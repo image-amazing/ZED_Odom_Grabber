@@ -9,9 +9,12 @@ endif(COMMAND cmake_policy)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   nav_msgs
+  sensor_msgs
+  geometry_msgs
   roscpp
   rospy
   std_msgs
+  tf2_msgs
 )
 find_package(ZED REQUIRED)
 find_package(Boost 1.5 COMPONENTS program_options REQUIRED)

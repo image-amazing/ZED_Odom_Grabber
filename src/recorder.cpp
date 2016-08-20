@@ -1,6 +1,9 @@
 #include "ros/ros.h"
 #include "nav_msgs/Odometry.h"
+#include "sensor_msgs/Imu.h"
 #include "std_msgs/String.h"
+#include "tf2_msgs/TFMessage.h"
+#include "geometry_msgs/TransformStamped.h"
 
 #include <fstream>
 #include <stdio.h>
@@ -38,25 +41,77 @@ typedef struct image_bufferStruct {
 Camera* zed;
 image_buffer* buffer;
 SENSING_MODE dm_type = RAW;
-ofstream out, time_out;
+ofstream out, time_out, out_imu, out_vicon;
 bool stop_signal;
 int count_run=0;
 bool newFrame=false;
 bool init = false;
-double starttime = 0.0;
+double starttime = 0.0, time_now = 0.0;
+bool odom_ok = false, imu_ok = false, vicon_ok = false, camera_ok = false;
+bool sync_ = false;
 
 void converter(const nav_msgs::Odometry::ConstPtr & msg)
 {
-    if(!init)
+    if(!odom_ok)
     {
-        init = true;
-        starttime = ros::Time::now().toSec();
+        odom_ok = true;
     }
-    cout << "Got a odom data at : " << ros::Time::now().toSec() - starttime << endl;
-    out << ros::Time::now().toSec() - starttime<< " "
-           << msg->pose.pose.position.x << " "
-           << msg->pose.pose.position.y << " "
-           << msg->pose.pose.orientation.w << endl;
+    else if(odom_ok && !sync_)
+    {
+        cout << "Odom has already prepared to record." << endl;
+    }
+    else
+    {
+        time_now = ros::Time::now().toSec() - starttime;
+        cout << "Got a odom data at : " << time_now << endl;
+        out << time_now << " "
+               << msg->pose.pose.position.x << " "
+               << msg->pose.pose.position.y << " "
+               << msg->pose.pose.orientation.w << endl;
+    }
+
+}
+
+void converter_imu(const sensor_msgs::Imu::ConstPtr & msg)
+{
+    if(!imu_ok)
+    {
+        imu_ok = true;
+    }
+    else if(imu_ok && !sync_)
+    {
+        cout << "Gyro has already prepared to record." << endl;
+    }
+    else
+    {
+        time_now = ros::Time::now().toSec() - starttime;
+        cout << "Got a gyro data at : " << time_now << endl;
+        out_imu << time_now << " "
+               << msg->orientation.w << " "
+               << msg->angular_velocity.z << endl;
+    }
+
+}
+
+void converter_vicon(const geometry_msgs::TransformStamped::ConstPtr & msg)
+{
+    if(!vicon_ok)
+    {
+        vicon_ok = true;
+    }
+    else if(vicon_ok && !sync_)
+    {
+        cout << "Vicon has already prepared to record." << endl;
+    }
+    else
+    {
+        time_now = ros::Time::now().toSec() - starttime;
+        cout << "Got a vicon data at : " << time_now << endl;
+        out_vicon << time_now << " "
+               << msg->transform.translation.x << " "
+               << msg->transform.translation.y << " "
+               << msg->transform.rotation.w << endl;
+    }
 }
 
 // Grabbing function
@@ -106,10 +161,29 @@ int main(int argc, char **argv) {
 
     out.open("/home/doom/odom.txt");
     time_out.open("/home/doom/time_svo.txt");
+    out_imu.open("/home/doom/gyro.txt");
+    out_vicon.open("/home/doom/vicon.txt");
 
     ros::init(argc, argv, "recorder");
     ros::NodeHandle n;
-    ros::Subscriber sub = n.subscribe("odom", 1000, converter);
+    ros::Subscriber sub = n.subscribe("/odom", 1000, converter);
+    ros::Subscriber sub1 = n.subscribe("/mobile_base/sensors/imu_data", 1000, converter_imu);
+    ros::Subscriber sub2 = n.subscribe("/vicon/turtlebot/body", 1000, converter_vicon);
+//    std::thread vicon_thread(converter_vicon);
+
+//    tf::TransformListener listener;
+//    tf::StampedTransform tfinfo;
+//    try {
+//        listener.lookupTransform("/base_footprint", "/odom",
+//                                 ros::Time(0), tfinfo);
+//        if(!vicon_ok)
+//        {
+//            vicon_ok = true;
+//        }
+//    } catch (tf::TransformException &ex) {
+//        ROS_ERROR("%s",ex.what());
+//        ros::Duration(1.0).sleep();
+//    }
 
     zed = new Camera(HD720,30);
 
@@ -137,13 +211,30 @@ int main(int argc, char **argv) {
     // Run thread
     std::thread grab_thread(grab_run);
     char key = ' ';
+    camera_ok = true;
+
+    ros::spinOnce();
+    sync_ = camera_ok & odom_ok & imu_ok & vicon_ok;
+
+    if(sync_ && !init)
+    {
+        cout << "The system has already synced... go go go!" << endl;
+        starttime = ros::Time::now().toSec();
+        init = true;
+    }
+    else if(!sync_)
+    {
+        cout << "Failed to sync... abort" << endl;
+        return 1;
+    }
 
     ros::Rate r(30);
-    double last =ros::Time::now().toSec();
     int count = 0;
     while (ros::ok()) {
-        if (newFrame)
+        if (newFrame && sync_)
         {
+            ros::spinOnce();
+
             newFrame=false; //indicates that we take care of this frame... next frame will be told by the grabbin thread.
 
             // Retrieve data from buffer
@@ -156,6 +247,9 @@ int main(int argc, char **argv) {
             buffer->mutex_input_rimage.unlock();
 
             // Do stuff
+            time_now = ros::Time::now().toSec() - starttime;
+            time_out << time_now << endl;
+
             std::stringstream ss;
             ss.str(""); ss << "/home/doom/zed/image_0/"
                               << std::setw(6) << std::setfill('0') << count << ".png";
@@ -165,22 +259,31 @@ int main(int argc, char **argv) {
             cv::imwrite(ss.str(), right);
             count++;
 
-            double now =ros::Time::now().toSec();
-            time_out << now - last << endl;
+//            listener.lookupTransform("/odom", "/base_footprint",
+//                                     ros::Time(0), tfinfo);
+//            time_now = ros::Time::now().toSec() - starttime;
+//            cout << "Got a Vicon data at : " << time_now << endl;
+//            out_vicon << time_now << " "
+//                   << tfinfo.getOrigin().x() << " "
+//                   << tfinfo.getOrigin().y() << " "
+//                   << tfinfo.getRotation().w() << endl;
 
-            ros::spinOnce();
+//            double now =ros::Time::now().toSec() - starttime;
+//            time_out << now << endl;
+
+//            ros::spinOnce();
 
             r.sleep();
         }
         else
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-
     }
 
     // Stop the grabbing thread
     stop_signal = true;
     grab_thread.join();
+//    vicon_thread.join();
 
     delete[] buffer->data_lim;
     delete[] buffer->data_rim;
