@@ -1,6 +1,7 @@
 #include "ros/ros.h"
 #include "nav_msgs/Odometry.h"
 #include "sensor_msgs/Imu.h"
+#include "sensor_msgs/JointState.h"
 #include "std_msgs/String.h"
 #include "tf2_msgs/TFMessage.h"
 #include "geometry_msgs/TransformStamped.h"
@@ -41,13 +42,14 @@ typedef struct image_bufferStruct {
 Camera* zed;
 image_buffer* buffer;
 SENSING_MODE dm_type = RAW;
-ofstream out, time_out, out_imu, out_vicon;
+ofstream out, time_out, out_imu, out_vicon, out_wheel;
 bool stop_signal;
 int count_run=0;
 bool newFrame=false;
 bool init = false;
 double starttime = 0.0, time_now = 0.0;
 bool odom_ok = false, imu_ok = false, vicon_ok = false, camera_ok = false;
+bool wheel_ok;
 bool sync_ = false;
 
 void converter(const nav_msgs::Odometry::ConstPtr & msg)
@@ -67,7 +69,29 @@ void converter(const nav_msgs::Odometry::ConstPtr & msg)
         out << time_now << " "
                << msg->pose.pose.position.x << " "
                << msg->pose.pose.position.y << " "
+               << msg->pose.pose.orientation.z << " "
                << msg->pose.pose.orientation.w << endl;
+    }
+
+}
+
+void converter_wheel(const sensor_msgs::JointState::ConstPtr & msg)
+{
+    if(!wheel_ok)
+    {
+        wheel_ok = true;
+    }
+    else if(wheel_ok && !sync_)
+    {
+        cout << "Wheel has already prepared to record." << endl;
+    }
+    else
+    {
+        time_now = ros::Time::now().toSec() - starttime;
+        cout << "Got a wheel data at : " << time_now << endl;
+        out_wheel << time_now << " "
+               << msg->velocity[0] << " "
+               << msg->velocity[1] << endl;
     }
 
 }
@@ -163,12 +187,14 @@ int main(int argc, char **argv) {
     time_out.open("/home/doom/time_svo.txt");
     out_imu.open("/home/doom/gyro.txt");
     out_vicon.open("/home/doom/vicon.txt");
+    out_wheel.open("/home/doom/wheel.txt");
 
     ros::init(argc, argv, "recorder");
     ros::NodeHandle n;
     ros::Subscriber sub = n.subscribe("/odom", 1000, converter);
     ros::Subscriber sub1 = n.subscribe("/mobile_base/sensors/imu_data", 1000, converter_imu);
     ros::Subscriber sub2 = n.subscribe("/vicon/turtlebot/body", 1000, converter_vicon);
+    ros::Subscriber sub3 = n.subscribe("/joint_states", 1000, converter_wheel);
 //    std::thread vicon_thread(converter_vicon);
 
 //    tf::TransformListener listener;
@@ -214,7 +240,7 @@ int main(int argc, char **argv) {
     camera_ok = true;
 
     ros::spinOnce();
-    sync_ = camera_ok & odom_ok & imu_ok & vicon_ok;
+    sync_ = camera_ok & odom_ok & imu_ok & vicon_ok & wheel_ok;
 
     if(sync_ && !init)
     {
